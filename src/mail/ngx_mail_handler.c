@@ -12,6 +12,7 @@
 
 
 static void ngx_mail_init_session(ngx_connection_t *c);
+static void ngx_mail_proxy_protocol_handler(ngx_event_t *rev);
 
 #if (NGX_MAIL_SSL)
 static void ngx_mail_ssl_init_connection(ngx_ssl_t *ssl, ngx_connection_t *c);
@@ -143,6 +144,8 @@ ngx_mail_init_connection(ngx_connection_t *c)
     ngx_log_error(NGX_LOG_INFO, c->log, 0, "*%uA client %*s connected to %V",
                   c->number, len, text, s->addr_text);
 
+    s->proxy_protocol = addr_conf->proxy_protocol;
+
     ctx = ngx_palloc(c->pool, sizeof(ngx_mail_log_ctx_t));
     if (ctx == NULL) {
         ngx_mail_close_connection(c);
@@ -175,6 +178,71 @@ ngx_mail_init_connection(ngx_connection_t *c)
     }
 #endif
 
+    if (s->proxy_protocol) {
+        c->log->action = "reading PROXY protocol";
+
+        ngx_add_timer(c->read, cscf->timeout);
+        c->read->handler = ngx_mail_proxy_protocol_handler;
+
+        if (ngx_handle_read_event(c->read, 0) != NGX_OK) {
+            ngx_mail_close_connection(c);
+        }
+        return;
+    }
+
+    ngx_mail_init_session(c);
+}
+
+
+void
+ngx_mail_proxy_protocol_handler(ngx_event_t *rev) {
+    u_char             *p, buf[NGX_PROXY_PROTOCOL_MAX_HEADER + 1], text[NGX_SOCKADDR_STRLEN];
+    size_t             size, len;
+    ssize_t            n;
+    ngx_err_t          err;
+    ngx_connection_t   *c;
+    ngx_mail_session_t *s;
+    ngx_mail_log_ctx_t *ctx;
+
+    c = rev->data;
+    s = c->data;
+
+    n = recv(c->fd, (char *) buf, sizeof(buf), MSG_PEEK);
+    err = ngx_socket_errno;
+
+    ngx_log_debug1(NGX_LOG_DEBUG_MAIL, c->log, 0, "mail recv(): %z", n);
+
+    if (n == -1) {
+        ngx_connection_error(c, err, "recv() failed");
+        ngx_mail_close_connection(c);
+        return;
+    }
+
+    p = ngx_proxy_protocol_read(c, buf, buf + n);
+    if (p == NULL) {
+        ngx_mail_close_connection(c);
+        return;
+    }
+
+    size = p - buf;
+
+    if (c->recv(c, buf, size) != (ssize_t) size) {
+        ngx_mail_close_connection(c);
+        return;
+    }
+
+    s->proxy_protocol = 0;
+
+    ctx = c->log->data;
+    ctx->client = &c->proxy_protocol->src_addr;
+
+    len = ngx_sock_ntop(c->sockaddr, c->socklen, text, NGX_SOCKADDR_STRLEN, 1);
+    ngx_log_error(NGX_LOG_INFO, c->log, 0,
+                  "*%uA client %*s proxy-protocol %*s:%d",
+                  c->number, len, text,
+                  c->proxy_protocol->src_addr.len, c->proxy_protocol->src_addr.data,
+                  c->proxy_protocol->src_port);
+
     ngx_mail_init_session(c);
 }
 
@@ -206,16 +274,27 @@ ngx_mail_ssl_init_connection(ngx_ssl_t *ssl, ngx_connection_t *c)
     ngx_mail_session_t        *s;
     ngx_mail_core_srv_conf_t  *cscf;
 
+    s = c->data;
+    cscf = ngx_mail_get_module_srv_conf(s, ngx_mail_core_module);
+
+    if (s->proxy_protocol) {
+        c->log->action = "reading PROXY protocol";
+
+        ngx_add_timer(c->read, cscf->timeout);
+        c->read->handler = ngx_mail_proxy_protocol_handler;
+
+        if (ngx_handle_read_event(c->read, 0) != NGX_OK) {
+            ngx_mail_close_connection(c);
+        }
+        return;
+    }
+
     if (ngx_ssl_create_connection(ssl, c, 0) != NGX_OK) {
         ngx_mail_close_connection(c);
         return;
     }
 
     if (ngx_ssl_handshake(c) == NGX_AGAIN) {
-
-        s = c->data;
-
-        cscf = ngx_mail_get_module_srv_conf(s, ngx_mail_core_module);
 
         ngx_add_timer(c->read, cscf->timeout);
 

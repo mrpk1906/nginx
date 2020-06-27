@@ -41,6 +41,7 @@ typedef struct {
     unsigned                ipv6only:1;
 #endif
     unsigned                so_keepalive:2;
+    unsigned                proxy_protocol:1;
 #if (NGX_HAVE_KEEPALIVE_TUNABLE)
     int                     tcp_keepidle;
     int                     tcp_keepintvl;
@@ -55,7 +56,8 @@ typedef struct {
 typedef struct {
     ngx_mail_conf_ctx_t    *ctx;
     ngx_str_t               addr_text;
-    ngx_uint_t              ssl;    /* unsigned   ssl:1; */
+    unsigned                ssl:1;
+    unsigned                proxy_protocol:1;
 } ngx_mail_addr_conf_t;
 
 typedef struct {
@@ -205,6 +207,8 @@ typedef struct {
     unsigned                esmtp:1;
     unsigned                auth_method:3;
     unsigned                auth_wait:1;
+    unsigned                ssl:1;
+    unsigned                proxy_protocol:1;
 
     ngx_str_t               login;
     ngx_str_t               passwd;
@@ -371,6 +375,7 @@ void ngx_mail_starttls_handler(ngx_event_t *rev);
 ngx_int_t ngx_mail_starttls_only(ngx_mail_session_t *s, ngx_connection_t *c);
 #endif
 
+ngx_int_t ngx_mail_realip_handler(ngx_mail_session_t *s);
 
 void ngx_mail_init_connection(ngx_connection_t *c);
 
